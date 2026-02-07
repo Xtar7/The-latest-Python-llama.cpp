@@ -1,0 +1,70 @@
+name: Build Windows Wheels (3.13/3.14 + CUDA)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'llama-cpp-python version (tag or commit)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  build-windows:
+    name: Windows Python ${{ matrix.python-version }} ${{ matrix.variant }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14.0-alpha - 3.14.0']
+        variant: ['cpu', 'cuda12.4', 'cuda11.8']
+        include:
+          - python-version: '3.14.0-alpha - 3.14.0'
+            tag: '3.14'
+          - variant: 'cpu'
+            cuda-pkg: ''
+            cmake-args: '-DLLAMA_CUDA=OFF'
+          - variant: 'cuda12.4'
+            cuda-pkg: '12.4.0'
+            cmake-args: '-DLLAMA_CUDA=ON'
+          - variant: 'cuda11.8'
+            cuda-pkg: '11.8.0'
+            cmake-args: '-DLLAMA_CUDA=ON'
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - uses: Jimver/cuda-toolkit@v0.2.16
+        if: matrix.cuda-pkg != ''
+        with:
+          cuda: ${{ matrix.cuda-pkg }}
+
+      - run: pip install uv
+
+      - run: |
+          uv venv
+          uv pip install build wheel setuptools scikit-build-core cmake ninja
+
+      - run: uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_AVX2=ON ${{ matrix.cmake-args }}"
+
+      - run: |
+          cd dist
+          ren *.whl *${{ matrix.variant }}.whl
+        if: matrix.variant != 'cpu'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-py${{ matrix.tag || matrix.python-version }}-${{ matrix.variant }}
+          path: dist/*.whl
+          retention-days: 30
