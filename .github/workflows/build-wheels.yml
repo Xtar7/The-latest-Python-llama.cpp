@@ -1,0 +1,336 @@
+name: Build llama-cpp-python Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'llama-cpp-python version (tag or commit)'
+        required: false
+        default: 'main'
+        type: string
+  
+  push:
+    branches: [main, master]
+  
+  release:
+    types: [published]
+
+jobs:
+  build-windows:
+    name: Build Windows Wheels (CPU)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14.0-alpha - 3.14.0']
+        arch: [x64]
+        include:
+          - python-version: '3.14.0-alpha - 3.14.0'
+            python-tag: '3.14'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: ${{ matrix.arch }}
+          allow-prereleases: true
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install build dependencies
+        run: |
+          uv venv
+          uv pip install build wheel setuptools scikit-build-core cmake ninja
+
+      - name: Build wheel (CPU only)
+        run: |
+          uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_AVX2=ON -DLLAMA_AVX512=OFF -DLLAMA_CUDA=OFF -DLLAMA_METAL=OFF -DLLAMA_OPENMP=OFF"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cpu-py${{ matrix.python-tag || matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  build-windows-cuda:
+    name: Build Windows Wheels (CUDA ${{ matrix.cuda-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14.0-alpha - 3.14.0']
+        cuda-version: ['12.4.0', '11.8.0']
+        include:
+          - python-version: '3.14.0-alpha - 3.14.0'
+            python-tag: '3.14'
+          - cuda-version: '12.4.0'
+            cuda-short: '124'
+          - cuda-version: '11.8.0'
+            cuda-short: '118'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install CUDA ${{ matrix.cuda-version }}
+        uses: Jimver/cuda-toolkit@v0.2.16
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda-version }}
+          method: network
+
+      - name: Verify CUDA installation
+        run: |
+          nvcc --version
+          echo "CUDA_PATH=$env:CUDA_PATH"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install build dependencies
+        run: |
+          uv venv
+          uv pip install build wheel setuptools scikit-build-core cmake ninja
+
+      - name: Build wheel with CUDA ${{ matrix.cuda-version }}
+        run: |
+          uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_CUDA=ON -DLLAMA_AVX2=ON -DCMAKE_CUDA_COMPILER=${{ steps.cuda-toolkit.outputs.CUDA_PATH }}/bin/nvcc.exe"
+          CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          CUDA_HOME: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+          FORCE_CUDA: 1
+
+      - name: Rename wheel with CUDA tag
+        run: |
+          $wheel = Get-ChildItem dist/*.whl | Select-Object -First 1
+          $newName = $wheel.Name -replace 'win_amd64', 'win_amd64_cuda${{ matrix.cuda-short }}'
+          Rename-Item $wheel.FullName $newName
+          Write-Host "Renamed to: $newName"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-cuda${{ matrix.cuda-short }}-py${{ matrix.python-tag || matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  build-linux:
+    name: Build Linux Wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14.0-alpha - 3.14.0']
+        include:
+          - python-version: '3.14.0-alpha - 3.14.0'
+            python-tag: '3.14'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build libopenblas-dev
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build wheel
+        run: |
+          uv venv
+          uv pip install build wheel setuptools scikit-build-core
+          uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_AVX2=ON -DLLAMA_AVX512=OFF -DLLAMA_CUDA=OFF -DLLAMA_METAL=OFF -DLLAMA_OPENBLAS=ON"
+
+      - name: Repair wheel (manylinux)
+        run: |
+          uv pip install auditwheel
+          uv run auditwheel repair dist/*.whl --wheel-dir wheelhouse
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-py${{ matrix.python-tag || matrix.python-version }}
+          path: wheelhouse/*.whl
+          retention-days: 30
+
+  build-linux-cuda:
+    name: Build Linux Wheels (CUDA ${{ matrix.cuda-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
+        cuda-version: ['12.4.0', '11.8.0']
+        include:
+          - cuda-version: '12.4.0'
+            cuda-short: '124'
+          - cuda-version: '11.8.0'
+            cuda-short: '118'
+    
+    container:
+      image: nvidia/cuda:${{ matrix.cuda-version }}-devel-ubuntu22.04
+    
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake ninja-build git curl python3-pip
+          # 安装指定版本 Python
+          apt-get install -y software-properties-common
+          add-apt-repository ppa:deadsnakes/ppa -y
+          apt-get install -y python${{ matrix.python-version }}-dev python${{ matrix.python-version }}-distutils
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build wheel with CUDA
+        run: |
+          uv venv --python python${{ matrix.python-version }}
+          uv pip install build wheel setuptools scikit-build-core
+          uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_CUDA=ON -DLLAMA_AVX2=ON"
+          CUDA_HOME: /usr/local/cuda
+
+      - name: Rename wheel with CUDA tag
+        run: |
+          for f in dist/*.whl; do
+            mv "$f" "${f/linux_x86_64/linux_x86_64_cuda${{ matrix.cuda-short }}}"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-cuda${{ matrix.cuda-short }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS Wheels
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14.0-alpha - 3.14.0']
+        include:
+          - python-version: '3.14.0-alpha - 3.14.0'
+            python-tag: '3.14'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: abetlen/llama-cpp-python
+          ref: ${{ github.event.inputs.version || 'main' }}
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build wheel
+        run: |
+          uv venv
+          uv pip install build wheel setuptools scikit-build-core cmake ninja
+          uv run python -m build --wheel --no-isolation
+        env:
+          CMAKE_ARGS: "-DLLAMA_METAL=ON -DLLAMA_METAL_EMBED_LIBRARY=ON -DLLAMA_AVX2=ON -DLLAMA_CUDA=OFF"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-py${{ matrix.python-tag || matrix.python-version }}
+          path: dist/*.whl
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-windows, build-windows-cuda, build-linux, build-linux-cuda, build-macos]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*.whl
+          body: |
+            Pre-built wheels for llama-cpp-python
+            
+            ### Includes:
+            - **Windows**: CPU, CUDA 11.8, CUDA 12.4
+            - **Linux**: CPU, CUDA 11.8, CUDA 12.4  
+            - **macOS**: CPU (Metal)
+            - **Python**: 3.9, 3.10, 3.11, 3.12, 3.13, 3.14 (alpha)
+            
+            ### Installation:
+            ```bash
+            # CPU version
+            uv pip install llama_cpp_python-xxx-win_amd64.whl
+            
+            # CUDA version
+            uv pip install llama_cpp_python-xxx-win_amd64_cuda124.whl
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
